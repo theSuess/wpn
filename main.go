@@ -1,13 +1,11 @@
 package main
 
 import (
-	"encoding/binary"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
-	"strings"
 
 	"golang.org/x/net/ipv4"
 
@@ -22,16 +20,15 @@ const (
 	BUFFERSIZE = 1500
 )
 
-// AddrPool stores and manages active connections
-type AddrPool struct {
-	tunName string
-	pool    map[*net.IP]bool
-}
-
 // ClientConfiguration tells the client how to configure the tun device
 type ClientConfiguration struct {
 	IP      string
 	Network string
+}
+
+type routeManager struct {
+	isClient bool
+	routes   map[string]chan []byte
 }
 
 func main() {
@@ -116,8 +113,11 @@ func main() {
 			},
 			Action: func(c *cli.Context) error {
 				log.WithField("Interface", c.GlobalString("interface")).Info("Starting Server")
-
-				p := AddrPool{}
+				tin := make(chan []byte, 1024)
+				go tunWriter(tun, tin)
+				rm := &routeManager{isClient: false, routes: make(map[string]chan []byte)}
+				go rm.tunListener(tun, nil)
+				p := AddressPool{}
 				p.Setup(c.String("range"), tun.Name())
 				conf := ClientConfiguration{Network: c.String("client-network")}
 
@@ -143,53 +143,22 @@ func main() {
 					if err != nil {
 						log.Fatal(err)
 					}
-					go func() {
-						for {
-							mt, packet, err := c.ReadMessage()
-							if err != nil {
-								log.Error(err)
-								p.Remove(cip)
-								return
-							}
-							if mt != 2 {
-								log.Error("Received invalid message type.")
-								p.Remove(cip)
-								return
-							}
-							header, err := ipv4.ParseHeader(packet)
-							if err != nil {
-								log.Error(err)
-								p.Remove(cip)
-								break
-							}
-							log.WithFields(log.Fields{
-								"Source": header.Src.String(),
-								"Dest":   header.Dst.String(),
-							}).Debug("Received Packet")
-							_, err = tun.Write(packet)
-							if err != nil {
-								log.Error(err)
-								break
-							}
-						}
-					}()
-					packet := make([]byte, BUFFERSIZE)
+					fail := make(chan error, 16)
+					tout := make(chan []byte, 1024)
+					go wsListener(c, tin, fail)
+					rm.Add(cip, tout)
 					for {
-						plen, err := tun.Read(packet)
-						if err != nil {
+						select {
+						case packet := <-tout:
+							err := c.WriteMessage(2, packet)
+							if err != nil {
+								log.Fatal(err)
+							}
+						case err := <-fail:
 							log.Error(err)
-							break
+							p.Remove(cip)
+							return
 						}
-						header, err := ipv4.ParseHeader(packet[:plen])
-						if err != nil {
-							log.Error(err)
-							break
-						}
-						log.WithFields(log.Fields{
-							"Source": header.Src.String(),
-							"Dest":   header.Dst.String(),
-						}).Debug("Received Packet")
-						c.WriteMessage(2, packet[:plen])
 					}
 				})
 				http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -209,6 +178,10 @@ func main() {
 					Usage: "Address of the remote server",
 					Value: "127.0.0.1:6969",
 				},
+				cli.BoolFlag{
+					Name:  "secure, s",
+					Usage: "use wss instead of ws",
+				},
 			},
 			Action: func(c *cli.Context) error {
 				log.WithField("Interface", c.GlobalString("interface")).Info("Starting Client")
@@ -217,8 +190,11 @@ func main() {
 					log.Error("Remote cannot be empty")
 					return nil
 				}
-
-				u := url.URL{Scheme: "wss", Host: c.String("remote"), Path: "/vpn"}
+				proto := "ws"
+				if c.Bool("secure") {
+					proto = "wss"
+				}
+				u := url.URL{Scheme: proto, Host: c.String("remote"), Path: "/vpn"}
 				log.Info("Connecting to %s", u.String())
 				w, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
 				if err != nil {
@@ -249,57 +225,28 @@ func main() {
 					log.Fatal(err)
 				}
 
-				go func() {
-					for {
-						mt, packet, err := w.ReadMessage()
-						if err != nil {
-							log.Fatal(err)
-							return
-						}
-						if mt != 2 {
-							log.Fatal("Received invalid message type.")
-							return
-						}
-						header, err := ipv4.ParseHeader(packet)
-						if err != nil {
-							log.Error(err)
-							break
-						}
-						log.WithFields(log.Fields{
-							"Source": header.Src.String(),
-							"Dest":   header.Dst.String(),
-						}).Debug("Received Packet")
-						_, err = tun.Write(packet)
-						if err != nil {
-							log.Error(err)
-							break
-						}
-					}
-				}()
-
-				packet := make([]byte, BUFFERSIZE)
+				wsout := make(chan []byte, 1024)
+				tout := make(chan []byte, 1024)
+				go wsListener(w, wsout, nil)
+				rm := &routeManager{isClient: true}
+				go rm.tunListener(tun, tout)
 				for {
-					plen, err := tun.Read(packet)
-					if err != nil {
-						log.Error(err)
-						break
+					select {
+					case packet := <-tout:
+						err = w.WriteMessage(2, packet)
+						if err != nil {
+							log.Error(err)
+							return err
+						}
+					case packet := <-wsout:
+						_, err := tun.Write(packet)
+						if err != nil {
+							log.Error(err)
+							return err
+						}
 					}
-					header, err := ipv4.ParseHeader(packet[:plen])
-					if err != nil {
-						log.Error(err)
-						break
-					}
-					log.WithFields(log.Fields{
-						"Source": header.Src.String(),
-						"Dest":   header.Dst.String(),
-					}).Debug("Received Packet")
-					err = w.WriteMessage(2, packet[:plen])
-					if err != nil {
-						log.Error(err)
-						break
-					}
+
 				}
-				return nil
 			},
 		},
 	}
@@ -309,57 +256,73 @@ func main() {
 	}
 }
 
-// Setup initializes the address pool
-func (a *AddrPool) Setup(r string, i string) {
-	a.tunName = i
-	a.pool = make(map[*net.IP]bool)
-	adrs := strings.Split(r, "-")
-	beg, end := net.ParseIP(adrs[0]), net.ParseIP(adrs[1])
-	bg := ip2int(beg)
-	e := ip2int(end)
-	for i := bg; i < e; i++ {
-		ip := int2ip(i)
-		a.pool[&ip] = false
-	}
+func (r *routeManager) Add(ip *net.IP, rec chan []byte) {
+	r.routes[ip.String()] = rec
 }
 
-// Get retrieves a free address
-func (a *AddrPool) Get() *net.IP {
-	for ip, u := range a.pool {
-		if !u {
-			// Inject IP route
-			cmd := exec.Command("/sbin/ip", "route", "add", ip.String(), "dev", a.tunName)
-			err := cmd.Run()
-			if err != nil {
-				log.Error(err)
-				return nil
+func (r *routeManager) tunListener(tun *water.Interface, out chan []byte) {
+	packet := make([]byte, BUFFERSIZE)
+	for {
+		plen, err := tun.Read(packet)
+		if err != nil {
+			log.Error(err)
+			continue
+		}
+		header, err := ipv4.ParseHeader(packet[:plen])
+		if err != nil {
+			log.Error(err)
+			continue
+		}
+		log.WithFields(log.Fields{
+			"Source":     header.Src.String(),
+			"Dest":       header.Dst.String(),
+			"SourceChan": "tun",
+		}).Debug("Received Packet")
+		if r.isClient {
+			out <- packet[:plen]
+		} else {
+			log.Debugf("Pushing Packet to %s", header.Dst.String())
+			c := r.routes[header.Dst.String()]
+			if c != nil {
+				c <- packet[:plen]
 			}
-			return ip
 		}
 	}
-	return nil
 }
 
-// Remove frees the address
-func (a *AddrPool) Remove(ip *net.IP) {
-	a.pool[ip] = false
-	cmd := exec.Command("/sbin/ip", "route", "del", ip.String(), "dev", a.tunName)
-	err := cmd.Run()
-	if err != nil {
-		log.Error(err)
+func tunWriter(tun *water.Interface, in <-chan []byte) {
+	for packet := range in {
+		_, err := tun.Write(packet)
+		if err != nil {
+			log.Error(err)
+		}
 	}
 }
 
-// IP to int code from here: https://gist.github.com/ammario/649d4c0da650162efd404af23e25b86b
-func ip2int(ip net.IP) uint32 {
-	if len(ip) == 16 {
-		return binary.BigEndian.Uint32(ip[12:16])
+func wsListener(ws *websocket.Conn, out chan []byte, fail chan error) {
+	for {
+		mt, packet, err := ws.ReadMessage()
+		if err != nil {
+			log.Error(err)
+			fail <- err
+			return
+		}
+		if mt != 2 {
+			log.Error("Received invalid message type.")
+			fail <- err
+			return
+		}
+		header, err := ipv4.ParseHeader(packet)
+		if err != nil {
+			log.Error(err)
+			fail <- err
+			break
+		}
+		log.WithFields(log.Fields{
+			"Source":     header.Src.String(),
+			"Dest":       header.Dst.String(),
+			"SourceChan": "ws",
+		}).Debug("Received Packet")
+		out <- packet
 	}
-	return binary.BigEndian.Uint32(ip)
-}
-
-func int2ip(nn uint32) net.IP {
-	ip := make(net.IP, 4)
-	binary.BigEndian.PutUint32(ip, nn)
-	return ip
 }
