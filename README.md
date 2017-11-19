@@ -24,3 +24,13 @@ wpn is only available for linux at the moment. Contributions to add support for 
 ### How secure is this?
 When not using secure websockets (wss) the security is basically nil. Otherwise the encryption of the same strength as HTTPS.
 Authorization can be set with the `--secret` parameter and allows for some kind of access restriction.
+
+#### Features
+- [x] Basic connectivity
+- [x] SSL
+- [x] Authorization
+- [ ] status reports
+- [ ] isolated VPN pool
+- [ ] Access lists
+- [ ] MacOS Support
+- [ ] Windows Support
