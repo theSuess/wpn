@@ -110,6 +110,11 @@ func main() {
 					Usage: "IP Range to distribute to clients",
 					Value: "10.69.69.100-10.69.69.150",
 				},
+				cli.StringFlag{
+					Name:  "secret",
+					Usage: "shared secret between server and client. Used for authorization",
+					Value: "WPN",
+				},
 			},
 			Action: func(c *cli.Context) error {
 				log.WithField("Interface", c.GlobalString("interface")).Info("Starting Server")
@@ -122,6 +127,10 @@ func main() {
 				conf := ClientConfiguration{Network: c.String("client-network")}
 
 				http.HandleFunc("/vpn", func(w http.ResponseWriter, r *http.Request) {
+					if r.Header.Get("X-WPN-Secret") != c.String("secret") {
+						w.WriteHeader(http.StatusForbidden)
+						_, _ = w.Write([]byte("Please authenticate yourself"))
+					}
 					cip := p.Get()
 					if cip == nil {
 						log.Error("Could not open new connection: No Address available")
@@ -182,6 +191,11 @@ func main() {
 					Name:  "secure, s",
 					Usage: "use wss instead of ws",
 				},
+				cli.StringFlag{
+					Name:  "secret",
+					Usage: "shared secret between server and client. Used for authorization",
+					Value: "WPN",
+				},
 			},
 			Action: func(c *cli.Context) error {
 				log.WithField("Interface", c.GlobalString("interface")).Info("Starting Client")
@@ -196,7 +210,9 @@ func main() {
 				}
 				u := url.URL{Scheme: proto, Host: c.String("remote"), Path: "/vpn"}
 				log.Info("Connecting to %s", u.String())
-				w, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
+				headers := http.Header{}
+				headers.Add("X-WPN-Secret", c.String("secret"))
+				w, _, err := websocket.DefaultDialer.Dial(u.String(), headers)
 				if err != nil {
 					log.Fatal(err)
 				}
