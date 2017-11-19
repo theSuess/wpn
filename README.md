@@ -20,3 +20,7 @@ Now the client can reach every device in the `192.168.69.0/24` network
 
 ### Platform support
 wpn is only available for linux at the moment. Contributions to add support for Windows,Mac or BSD are welcomed.
+
+### How secure is this?
+When not using secure websockets (wss) the security is basically nil. Otherwise the encryption of the same strength as HTTPS.
+Authorization can be set with the `--secret` parameter and allows for some kind of access restriction.
