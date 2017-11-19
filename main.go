@@ -115,6 +115,16 @@ func main() {
 					Usage: "shared secret between server and client. Used for authorization",
 					Value: "WPN",
 				},
+				cli.StringFlag{
+					Name:  "certfile",
+					Usage: "location of the SSL Certificate",
+					Value: "",
+				},
+				cli.StringFlag{
+					Name:  "keyfile",
+					Usage: "location of the SSL Key",
+					Value: "",
+				},
 			},
 			Action: func(c *cli.Context) error {
 				log.WithField("Interface", c.GlobalString("interface")).Info("Starting Server")
@@ -173,7 +183,11 @@ func main() {
 				http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 					http.Redirect(w, r, "https://github.com/theSuess/wpn", http.StatusTemporaryRedirect)
 				})
-				log.Fatal(http.ListenAndServe(c.String("listen"), nil))
+				if c.String("certfile") != "" && c.String("keyfile") != "" {
+					log.Fatal(http.ListenAndServeTLS(c.String("listen"), c.String("certfile"), c.String("keyfile"), nil))
+				} else {
+					log.Fatal(http.ListenAndServe(c.String("listen"), nil))
+				}
 				return nil
 			},
 		},
