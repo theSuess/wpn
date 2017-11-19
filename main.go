@@ -223,7 +223,7 @@ func main() {
 					proto = "wss"
 				}
 				u := url.URL{Scheme: proto, Host: c.String("remote"), Path: "/vpn"}
-				log.Info("Connecting to %s", u.String())
+				log.Infof("Connecting to %s", u.String())
 				headers := http.Header{}
 				headers.Add("X-WPN-Secret", c.String("secret"))
 				w, _, err := websocket.DefaultDialer.Dial(u.String(), headers)
