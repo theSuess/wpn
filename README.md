@@ -2,8 +2,8 @@
 Easy to use websocket VPN
 
 ### WTF is this?
-wpn is a VPN solution using websockets as transport layer. Usefull when running behind a reverse proxy like nginx
-
+wpn is a VPN solution using websockets as transport layer. Usefull when running behind a reverse proxy like nginx.
+There are some other websocket-vpns but wpn aims for usability.
 ### Setup
 
 ```.bash
