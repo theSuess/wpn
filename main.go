@@ -1,11 +1,7 @@
 package main
 
 import (
-	"net"
-	"net/http"
-	"net/url"
 	"os"
-	"os/exec"
 
 	"golang.org/x/net/ipv4"
 
@@ -19,17 +15,6 @@ const (
 	// BUFFERSIZE is the size of received and sent packets
 	BUFFERSIZE = 1500
 )
-
-// ClientConfiguration tells the client how to configure the tun device
-type ClientConfiguration struct {
-	IP      string
-	Network string
-}
-
-type routeManager struct {
-	isClient bool
-	routes   map[string]chan []byte
-}
 
 func main() {
 	app := cli.NewApp()
@@ -47,7 +32,6 @@ func main() {
 			Usage: "Show debug messages",
 		},
 	}
-
 	var tun *water.Interface
 	app.Before = func(c *cli.Context) error {
 		if c.Args().Get(1) == "--help" {
@@ -75,8 +59,7 @@ func main() {
 		// Set up IP Configuration
 
 		// Bring interface up
-		cmd := exec.Command("/sbin/ip", "link", "set", "dev", tun.Name(), "up")
-		err = cmd.Run()
+		err = setDevUp(tun.Name())
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -126,70 +109,7 @@ func main() {
 					Value: "",
 				},
 			},
-			Action: func(c *cli.Context) error {
-				log.WithField("Interface", c.GlobalString("interface")).Info("Starting Server")
-				tin := make(chan []byte, 1024)
-				go tunWriter(tun, tin)
-				rm := &routeManager{isClient: false, routes: make(map[string]chan []byte)}
-				go rm.tunListener(tun, nil)
-				p := AddressPool{}
-				p.Setup(c.String("range"), tun.Name())
-				conf := ClientConfiguration{Network: c.String("client-network")}
-
-				http.HandleFunc("/vpn", func(w http.ResponseWriter, r *http.Request) {
-					if r.Header.Get("X-WPN-Secret") != c.String("secret") {
-						w.WriteHeader(http.StatusForbidden)
-						_, _ = w.Write([]byte("Please authenticate yourself"))
-					}
-					cip := p.Get()
-					if cip == nil {
-						log.Error("Could not open new connection: No Address available")
-						_, _ = w.Write([]byte("No Addresss available"))
-						return
-					}
-					log.WithFields(log.Fields{
-						"remote":   r.RemoteAddr,
-						"clientip": cip,
-					}).Info("New Client connected")
-					conf.IP = cip.String()
-					upgrader := websocket.Upgrader{}
-					c, err := upgrader.Upgrade(w, r, nil)
-					if err != nil {
-						log.Fatal(err)
-					}
-					defer c.Close()
-					err = c.WriteJSON(conf)
-					if err != nil {
-						log.Fatal(err)
-					}
-					fail := make(chan error, 16)
-					tout := make(chan []byte, 1024)
-					go wsListener(c, tin, fail)
-					rm.Add(cip, tout)
-					for {
-						select {
-						case packet := <-tout:
-							err := c.WriteMessage(2, packet)
-							if err != nil {
-								log.Fatal(err)
-							}
-						case err := <-fail:
-							log.Error(err)
-							p.Remove(cip)
-							return
-						}
-					}
-				})
-				http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-					http.Redirect(w, r, "https://github.com/theSuess/wpn", http.StatusTemporaryRedirect)
-				})
-				if c.String("certfile") != "" && c.String("keyfile") != "" {
-					log.Fatal(http.ListenAndServeTLS(c.String("listen"), c.String("certfile"), c.String("keyfile"), nil))
-				} else {
-					log.Fatal(http.ListenAndServe(c.String("listen"), nil))
-				}
-				return nil
-			},
+			Action: NewServer(tun).Run,
 		},
 		{
 			Name:    "client",
@@ -211,112 +131,12 @@ func main() {
 					Value: "WPN",
 				},
 			},
-			Action: func(c *cli.Context) error {
-				log.WithField("Interface", c.GlobalString("interface")).Info("Starting Client")
-
-				if c.String("remote") == "" {
-					log.Error("Remote cannot be empty")
-					return nil
-				}
-				proto := "ws"
-				if c.Bool("secure") {
-					proto = "wss"
-				}
-				u := url.URL{Scheme: proto, Host: c.String("remote"), Path: "/vpn"}
-				log.Infof("Connecting to %s", u.String())
-				headers := http.Header{}
-				headers.Add("X-WPN-Secret", c.String("secret"))
-				w, _, err := websocket.DefaultDialer.Dial(u.String(), headers)
-				if err != nil {
-					log.Fatal(err)
-				}
-				conf := &ClientConfiguration{}
-				err = w.ReadJSON(&conf)
-				if err != nil {
-					log.Fatal(err)
-				}
-
-				log.WithFields(log.Fields{
-					"IP":      conf.IP,
-					"Network": conf.Network,
-				}).Info("Received Configuration")
-
-				// Set IP on interface
-				cmd := exec.Command("/sbin/ip", "addr", "add", conf.IP, "dev", tun.Name())
-				err = cmd.Run()
-				if err != nil {
-					log.Fatal(err)
-				}
-
-				// Inject IP route
-				cmd = exec.Command("/sbin/ip", "route", "add", conf.Network, "dev", tun.Name())
-				err = cmd.Run()
-				if err != nil {
-					log.Fatal(err)
-				}
-
-				wsout := make(chan []byte, 1024)
-				tout := make(chan []byte, 1024)
-				go wsListener(w, wsout, nil)
-				rm := &routeManager{isClient: true}
-				go rm.tunListener(tun, tout)
-				for {
-					select {
-					case packet := <-tout:
-						err = w.WriteMessage(2, packet)
-						if err != nil {
-							log.Error(err)
-							return err
-						}
-					case packet := <-wsout:
-						_, err := tun.Write(packet)
-						if err != nil {
-							log.Error(err)
-							return err
-						}
-					}
-
-				}
-			},
+			Action: NewClient(tun).Run,
 		},
 	}
 	err := app.Run(os.Args)
 	if err != nil {
 		log.Error(err)
-	}
-}
-
-func (r *routeManager) Add(ip *net.IP, rec chan []byte) {
-	r.routes[ip.String()] = rec
-}
-
-func (r *routeManager) tunListener(tun *water.Interface, out chan []byte) {
-	packet := make([]byte, BUFFERSIZE)
-	for {
-		plen, err := tun.Read(packet)
-		if err != nil {
-			log.Error(err)
-			continue
-		}
-		header, err := ipv4.ParseHeader(packet[:plen])
-		if err != nil {
-			log.Error(err)
-			continue
-		}
-		log.WithFields(log.Fields{
-			"Source":     header.Src.String(),
-			"Dest":       header.Dst.String(),
-			"SourceChan": "tun",
-		}).Debug("Received Packet")
-		if r.isClient {
-			out <- packet[:plen]
-		} else {
-			log.Debugf("Pushing Packet to %s", header.Dst.String())
-			c := r.routes[header.Dst.String()]
-			if c != nil {
-				c <- packet[:plen]
-			}
-		}
 	}
 }
 

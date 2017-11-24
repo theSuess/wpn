@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/binary"
 	"net"
-	"os/exec"
 	"strings"
 
 	log "github.com/sirupsen/logrus"
@@ -32,8 +31,7 @@ func (a *AddressPool) Setup(r string, i string) {
 // Remove frees the address
 func (a *AddressPool) Remove(ip *net.IP) {
 	a.pool[ip] = false
-	cmd := exec.Command("/sbin/ip", "route", "del", ip.String(), "dev", a.tunName)
-	err := cmd.Run()
+	err := removeDevRoute(ip.String(), a.tunName)
 	if err != nil {
 		log.Error(err)
 	}
@@ -44,8 +42,7 @@ func (a *AddressPool) Get() *net.IP {
 	for ip, u := range a.pool {
 		if !u {
 			// Inject IP route
-			cmd := exec.Command("/sbin/ip", "route", "add", ip.String(), "dev", a.tunName)
-			err := cmd.Run()
+			err := addDevRoute(ip.String(), a.tunName)
 			if err != nil {
 				log.Error(err)
 				return nil
