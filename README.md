@@ -1,4 +1,4 @@
-# wpn
+# wpn [![Go Report Card](https://goreportcard.com/badge/github.com/theSuess/wpn)](https://goreportcard.com/report/github.com/theSuess/wpn)
 Easy to use websocket VPN
 
 ### WTF is this?
