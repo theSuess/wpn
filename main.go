@@ -109,7 +109,10 @@ func main() {
 					Value: "",
 				},
 			},
-			Action: NewServer(tun).Run,
+			Action: func(c *cli.Context) error {
+				s := NewServer(tun)
+				return s.Run(c)
+			},
 		},
 		{
 			Name:    "client",
@@ -131,7 +134,10 @@ func main() {
 					Value: "WPN",
 				},
 			},
-			Action: NewClient(tun).Run,
+			Action: func(c *cli.Context) error {
+				cl := NewClient(tun)
+				return cl.Run(c)
+			},
 		},
 	}
 	err := app.Run(os.Args)
@@ -156,6 +162,9 @@ func wsListener(ws *websocket.Conn, out chan []byte, fail chan error) {
 			log.Error(err)
 			fail <- err
 			return
+		}
+		if mt == 9 {
+			continue
 		}
 		if mt != 2 {
 			log.Error("Received invalid message type.")

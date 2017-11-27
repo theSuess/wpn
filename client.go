@@ -3,8 +3,12 @@ package main
 import (
 	"net/http"
 	"net/url"
+	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/gorilla/websocket"
+	"github.com/jasonlvhit/gocron"
 	log "github.com/sirupsen/logrus"
 	"github.com/songgao/water"
 	"github.com/urfave/cli"
@@ -74,21 +78,42 @@ func (cl *Client) Run(c *cli.Context) error {
 	go wsListener(w, wsout, nil)
 	rm := &routeManager{isClient: true}
 	go rm.tunListener(cl.tun, tout)
-	for {
-		select {
-		case packet := <-tout:
-			err = w.WriteMessage(2, packet)
-			if err != nil {
-				log.Error(err)
-				return err
-			}
-		case packet := <-wsout:
-			_, err := cl.tun.Write(packet)
-			if err != nil {
-				log.Error(err)
-				return err
+	errors := make(chan error)
+	go func() {
+		for {
+			select {
+			case packet := <-tout:
+				err = w.WriteMessage(2, packet)
+				if err != nil {
+					log.Error(err)
+					errors <- err
+				}
+			case packet := <-wsout:
+				_, err := cl.tun.Write(packet)
+				if err != nil {
+					log.Error(err)
+					errors <- err
+				}
 			}
 		}
+	}()
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGKILL, syscall.SIGQUIT)
+	log.Info("Established connection")
 
+	gocron.Every(15).Seconds().Do(func() {
+		log.Info("Sending Keepalive")
+		err := w.WriteMessage(websocket.PingMessage, []byte("KEEPALIVE"))
+		if err != nil {
+			errors <- err
+			return
+		}
+	})
+	_ = gocron.Start()
+	select {
+	case _ = <-sigs:
+		return nil
+	case err := <-errors:
+		return err
 	}
 }
