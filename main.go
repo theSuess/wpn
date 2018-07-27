@@ -56,8 +56,6 @@ func main() {
 		}
 		tun = t
 
-		// Set up IP Configuration
-
 		// Bring interface up
 		err = setDevUp(tun.Name())
 		if err != nil {
