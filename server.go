@@ -59,7 +59,7 @@ func (s *Server) Run(c *cli.Context) error {
 		if err != nil {
 			log.Fatal(err)
 		}
-		defer c.Close()
+		defer func() { _ = c.Close() }()
 		err = c.WriteJSON(conf)
 		if err != nil {
 			log.Fatal(err)
@@ -87,9 +87,8 @@ func (s *Server) Run(c *cli.Context) error {
 	})
 	if c.String("certfile") != "" && c.String("keyfile") != "" {
 		log.Fatal(http.ListenAndServeTLS(c.String("listen"), c.String("certfile"), c.String("keyfile"), nil))
-	} else {
-		log.Fatal(http.ListenAndServe(c.String("listen"), nil))
 	}
+	log.Fatal(http.ListenAndServe(c.String("listen"), nil))
 	return nil
 }
 
